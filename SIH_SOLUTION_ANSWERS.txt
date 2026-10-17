@@ -1,0 +1,338 @@
+PROPOSED SOLUTION - SIH SUBMISSION ANSWERS
+Freight Forecasting & Chartering Platform
+Bulk cargo procurement into India's East Coast ports
+==========================================================================
+
+
+1. DETAILED EXPLANATION OF THE PROPOSED SOLUTION
+--------------------------------------------------------------------------
+A constraint-aware decision-support platform that moves chartering from
+reactive daily market exploration to a proactive, measured strategy. It is a
+working prototype: a FastAPI backend (~10,900 lines of Python, 122 passing
+tests), a React dashboard of six screens, and a live ingestion layer pulling
+five free public sources daily.
+
+Five engines, each answering one operational question:
+
+  (a) Loadable-Tonnes Engine - deterministic ship physics. Given a vessel,
+      berth, tide, water density and coal grade, it computes exactly how many
+      tonnes can be loaded, and reports which of four limits bound: draft,
+      deadweight, hold volume (low-CV coal cubes out before the marks), or a
+      hard dimensional rejection on LOA/beam/air-draft. Auditable against a
+      loading computer - nothing here is learned or forecast.
+
+  (b) Chartering Advisor - ranks every feasible way to move a parcel across
+      8 vessel classes, 14 ports and 26 berths, with the constraint arithmetic
+      shown. Transhipment/lightering is a first-class routing, not an
+      exception, because for Haldia (8.5 m draft, 230 m LOA) it usually IS the
+      answer - Sandheads has 40-50 m of water a short distance away.
+
+  (c) Freight Forecaster - LightGBM quantile regression producing a calibrated
+      predictive distribution (7 quantiles x 6 horizons: 1/2/4/8/13/26 weeks),
+      conformalised so the intervals mean what they say, with a SARIMAX second
+      opinion, GARCH(1,1) + HAR-RV volatility, and Markov-switching + CUSUM
+      regime detection.
+
+  (d) Entry-Timing Optimiser - answers WHEN to fix, not just what the rate
+      will be. Fixing is an optimal-stopping problem solved by backward
+      induction over correlated scenarios against E[cost] + lambda*CVaR95[cost].
+      Returns FIX NOW / WAIT / SPLIT with the value of waiting, the probability
+      a later date is cheaper, the regret if the call is wrong, and a
+      spot-versus-term efficient frontier.
+
+  (e) Risk Watch - seven monitors (freight volatility, regime shift, port
+      congestion, predicted detention, import-plant coal stocks, Bay of Bengal
+      cyclones, feed health). Every alert carries the numbers behind it AND
+      what it implies for a chartering decision.
+
+Underpinning all of it: a discrete-time hazard model of pre-berthing detention
+fitted on 418 reconstructed Paradip port calls (19% censored), which prices the
+demurrage term that is often larger than the freight difference between two
+routings.
+
+
+2. HOW IT ADDRESSES THE PROBLEM
+--------------------------------------------------------------------------
+Mapped directly onto the four deliverables in the problem statement:
+
+  (a) Optimal Market Entry Timing -> opt/timing.py. Not a fan chart but an
+      optimal-stopping solution with an explicit carry cost (inventory carry
+      plus a stockout penalty scaled by the CEA days-of-burn signal). Without
+      that carry term a model always waits, because optionality is free if
+      delay costs nothing - the exact mistake a naive "wait for a better rate"
+      heuristic makes.
+
+  (b) Vessel Type Optimization -> domain/loadable_tonnes.py + feasibility.py.
+      Every recommendation is gated by real berth limits before any economics
+      are computed. Draft, LOA, beam, air draft, handling rate and water
+      density are read from a versioned constraint master covering all eight
+      East Coast ports (Paradip, Vizag, Gangavaram, Gopalpur, Dhamra, Haldia,
+      Sagar, Sandheads) plus load ports in Australia, Indonesia, Mozambique
+      and the US.
+
+  (c) Idle Scenario Management -> the waiting-time hazard model turns queue
+      length into a distribution of days at anchorage, and the timing engine
+      prices that as demurrage. Laycan shifting is recommended with the dollar
+      figure attached. Transhipment is evaluated as a live alternative to
+      idling on a draft-limited berth.
+
+  (d) Risk Mitigation -> domain/alerts.py, seven rules, each a pure function
+      over held data, each with severity, observed numbers, source evidence
+      and a chartering action. Alerts are persisted rather than recomputed, so
+      an alert that fired and later cleared is a testable prediction and rule
+      precision becomes measurable after a season.
+
+The stated objective - moving from multiple single spot fixtures to short and
+medium term multi-voyage contracts - is answered directly by the contract-mix
+efficient frontier, which prices the premium paid for reduced dispersion and
+selects the term share that minimises the same risk-adjusted objective.
+
+
+3. INNOVATION AND UNIQUENESS
+--------------------------------------------------------------------------
+  * Physics before prediction. Most freight-forecasting projects predict a
+    rate and stop. Here a deterministic, auditable constraint engine gates
+    everything, so no recommendation can name a vessel that cannot physically
+    berth. The provably-right part carries the provably-uncertain part.
+
+  * An honesty gate that can say "no edge". Dry bulk freight is near a random
+    walk in log space, which is why most such projects quietly stop reporting
+    skill numbers. Every forecast is scored on strictly walk-forward folds with
+    an embargo equal to the horizon, against random-walk and seasonal-naive
+    baselines, on BOTH distributional (CRPS) and point (MAE) comparisons. It
+    may claim an edge only when it wins both, against every baseline, with
+    enough folds. Where it does not, the UI shows a "no edge" badge and the
+    timing engine refuses to time the market - returning the real feasibility
+    and cost arithmetic instead. An unmeasured model is treated as having no
+    edge, not as fine.
+
+  * Calibrated intervals, not decorative ones. Conformalised quantile
+    regression (CQR) gives distribution-free, finite-sample coverage. This
+    matters because the optimiser takes a CVaR over the tail: if the 90th
+    percentile is really the 75th, every downstream number is wrong in the
+    direction that makes the platform look more confident than it is.
+
+  * Timing as optimal stopping, not as forecasting. The value of waiting is an
+    option value - larger under high volatility, smaller near a deadline,
+    smaller again when our own coal stocks are running down.
+
+  * Correlated scenarios. A Gaussian copula ties freight, congestion and
+    bunker shocks together, because in a firm market all three move up at once.
+    Independent draws let good and bad news cancel and produce a CVaR far too
+    flattering to trust.
+
+  * Censoring handled correctly. 19% of port calls are censored; a plain
+    regression on waiting days is biased short in all three of the usual
+    workarounds. A discrete-time hazard model uses those rows for exactly what
+    they tell us and no more.
+
+  * Enforced data provenance. Every ingested row carries source_name,
+    source_url, retrieved_at and is_synthetic. The ingestion layer REFUSES to
+    write a synthetic row whose source is not declared in SYNTHETIC_DATA.md,
+    and a test asserts the disclosure cannot drift out of date. Three badge
+    types on screen - real, synthetic, modelled - and model output deliberately
+    carries no provenance mixin, so a forecast can never inflate the "% real"
+    figure. The FFA forward curve is exchange-licensed and not held, so the
+    platform reports "benchmark unavailable" rather than manufacturing one to
+    beat; app/ml/evaluate.py enforces that in code.
+
+  * Built entirely on free, public, legally accessible sources. No paid
+    Baltic, Kpler, Argus or Clarksons feed is required to run it.
+
+
+4. TECHNOLOGIES TO BE USED
+--------------------------------------------------------------------------
+Backend / API
+  Python 3.11, FastAPI, Uvicorn, Pydantic + pydantic-settings, SQLAlchemy,
+  SQLite (warehouse.db), DuckDB + PyArrow/Parquet for analytics, PyYAML for
+  the versioned constraint masters.
+
+Machine learning / statistics
+  LightGBM (quantile objective, direct multi-horizon), scikit-learn (logistic
+  hazard), statsmodels (SARIMAX, Markov regime switching), arch (GARCH(1,1),
+  Student-t errors), NumPy / SciPy / pandas. Split-conformal calibration
+  implemented in-house (app/ml/conformal.py).
+
+Optimisation
+  Backward-induction optimal stopping and Gaussian-copula scenario generation
+  written in NumPy; Pyomo + HiGHS declared for the planned stochastic MILP.
+
+Ingestion
+  httpx, BeautifulSoup4 + lxml, pdfplumber (including a word-coordinate parser
+  for stacked PDF table cells), openpyxl / xlrd, APScheduler, websockets (AIS).
+
+Frontend
+  React 18 + TypeScript, Vite 6, Apache ECharts (echarts-for-react).
+  Six screens: Chartering Advisor, Entry Timing, Risk Watch, Port Watch,
+  Market Cockpit, Data Provenance.
+
+Testing / tooling
+  pytest (122 tests, including dedicated leakage, conformal-coverage, timing,
+  waiting-model and alert-rule suites), Git.
+
+Hardware
+  None special. Runs on a single commodity laptop or VM - no GPU, no cluster.
+  Models are deliberately small because the histories are short.
+
+Data sources (all free and public, all live)
+  Paradip Port Authority daily traffic PDF (queue, berth, LOA, draft);
+  CEA daily coal report (stock and days-of-burn for 191 plants, 15 of them
+  import-designed); World Bank Pink Sheet (coal, crude, iron ore, monthly);
+  Shanghai Shipping Exchange CDFI (route-level coal freight in $/tonne - the
+  forecast target); NOAA IBTrACS North Indian Ocean (cyclone best tracks).
+
+
+5. METHODOLOGY AND PROCESS FOR IMPLEMENTATION
+--------------------------------------------------------------------------
+Daily pipeline (scripts/backfill.py, then scripts/run_models.py):
+
+  INGEST      one adapter per source behind a caching base class; every raw
+              PDF/XLSX archived byte-for-byte to data/raw/ so a parser
+              improvement can be replayed against history rather than
+              re-scraped. Provenance stamped on write; undisclosed synthetic
+              rows rejected.
+                  |
+  PANEL       daily causal panel assembled; every column lagged so a row
+              dated t is knowable on the morning of t.
+                  |
+  FEATURES    momentum and realised volatility at 5/10/20/60d; cross-route
+              Cape/Panamax/Supramax spreads (the substitution signal); CEA
+              days-of-burn level and slope; Paradip queue length, slope and
+              60d z-score; coal price and the NEWC-Richards Bay arbitrage
+              spread; Fourier annual terms plus monsoon and cyclone-season
+              flags. Missing data left missing - LightGBM splits on it.
+                  |
+  FIT         one model per (horizon, quantile) on the log level. Most recent
+              25% held out as a BLOCK - never a random split, since
+              neighbouring days in a near-unit-root series are almost the same
+              observation - for conformal calibration. Refuses to fit below
+              250 usable rows rather than returning a confident-looking curve
+              fitted on nothing.
+                  |
+  CALIBRATE   CQR widening from the held-out fold; quantile crossing repaired
+              by sorting.
+                  |
+  EVALUATE    walk-forward folds with an embargo equal to the horizon; pinball
+              loss, CRPS, MASE, empirical 80% coverage, PIT histogram; skill
+              against every baseline. Sets the has_edge flag consumed
+              downstream.
+                  |
+  SIDE MODELS GARCH(1,1) + HAR-RV volatility; Markov-switching + CUSUM regime;
+              discrete-time berthing hazard from the port-call archive.
+                  |
+  DECIDE      feasibility screen -> correlated scenario draws through the
+              calibrated quantiles -> backward induction
+
+                  V(T) = fix_cost(T)                               (deadline)
+                  V(d) = min( fix_cost(d), E[V(d+1)] + carry(d) )  (earlier)
+
+              on E[cost] + lambda*CVaR95[cost] -> contract-mix frontier.
+                  |
+  ALERT       seven pure-function rules over held data; raise / refresh / clear
+              lifecycle handled idempotently.
+                  |
+  SERVE       19 REST endpoints; React dashboard.
+
+Repository layout
+  backend/app/ingest/   one adapter per source, caching base class
+  backend/app/domain/   loadable_tonnes.py (physics), feasibility.py (screen),
+                        alerts.py (risk rules)
+  backend/app/ml/       panel, features, quantile, conformal, volatility,
+                        regime, waiting_model, evaluate, pipeline
+  backend/app/opt/      scenarios.py (correlated draws), timing.py (stopping)
+  backend/app/models/   SQLAlchemy schema, ProvenanceMixin on ingested tables
+  backend/app/api/      FastAPI routes
+  backend/data/         raw archives, reference YAML, warehouse.db
+  frontend/src/pages/   the six screens
+
+Running the prototype
+  py -m venv .venv
+  ./.venv/Scripts/python.exe -m pip install -r backend/requirements.txt
+  ./.venv/Scripts/python.exe scripts/backfill.py --all
+  ./.venv/Scripts/python.exe scripts/run_models.py
+  cd backend && ../.venv/Scripts/python.exe -m uvicorn app.main:app --reload
+  cd frontend && npm install && npm run dev
+  API docs at http://127.0.0.1:8000/docs, UI at http://localhost:5173
+
+Roadmap
+  Second congestion port (Vizag) - one port's queue is not a market signal, and
+  this is the highest-value addition left; AIS tonnage-supply index; two-stage
+  stochastic MILP for contract mix (Pyomo/HiGHS already declared); SMP Kolkata
+  tidal draft circulars; automatic switch to real CDFI history once it passes
+  250 observations.
+
+
+6. POTENTIAL IMPACT ON THE TARGET AUDIENCE
+--------------------------------------------------------------------------
+Primary users - chartering and logistics managers procuring imported coal for
+East Coast Indian ports: utilities, steel and cement producers, port operators
+and government importers.
+
+  * Replaces daily broker-dependent market exploration with a standing,
+    evidence-backed recommendation, reclaiming analyst hours currently spent
+    reconstructing the same picture every morning.
+
+  * Makes the decision auditable. Every recommendation shows the constraint
+    arithmetic, the source of every number, and the cost of being wrong - so a
+    fixture can be justified to a procurement committee or an auditor rather
+    than defended as judgement.
+
+  * Prevents the expensive, invisible errors: nominating a vessel that cannot
+    berth at its declared draft, under-loading because low-CV coal cubed out,
+    or discovering a lightering requirement after the fixture is signed.
+
+  * Institutionalises knowledge. Berth limits, tidal behaviour, transhipment
+    topology and demurrage patterns currently live in a few experienced heads;
+    here they are versioned files and tested code that survive staff turnover.
+
+  * Shifts the negotiating position. Walking into a fixture with a calibrated
+    distribution, a quantified value of waiting and a term-versus-spot frontier
+    is a materially stronger stance than reacting to a broker's quote.
+
+  * Builds trust by refusing to overclaim. The "no edge" badge means users
+    learn precisely when to rely on the model and when to rely on judgement.
+    The failure mode that kills adoption of forecasting tools is a confident
+    wrong number, and this system is engineered not to produce one.
+
+
+7. BENEFITS OF THE SOLUTION
+--------------------------------------------------------------------------
+Economic
+  * Lower delivered cost per tonne through better fixture timing, and by
+    trading spot exposure against term cover on a priced frontier rather than
+    by habit.
+  * Reduced demurrage and detention: pre-berthing waiting time is forecast as
+    a distribution and priced, and laycans can be shifted with a dollar figure
+    attached. On draft-constrained lanes this term frequently exceeds the
+    freight difference between two routings.
+  * Higher vessel utilisation: loading to the true binding constraint rather
+    than to a conservative rule of thumb means fewer tonnes left behind on
+    every voyage.
+  * Fewer idle days and less deadheading through demand-aware positioning.
+  * Zero recurring data cost - the entire stack runs on free public sources,
+    so it is deployable without a Baltic or Kpler subscription.
+
+Operational and supply-chain
+  * More predictable coal availability at import-designed plants, driven by the
+    CEA days-of-burn signal feeding the urgency term directly.
+  * Earlier warning of congestion, cyclones, regime shifts and feed failures,
+    with a stated action attached to each.
+  * A defensible, reproducible audit trail for every chartering decision.
+
+Environmental
+  * Better-utilised vessels mean fewer voyages per tonne delivered, and lower
+    fuel burn and CO2 per tonne-mile.
+  * Less time idling at anchorage - auxiliary engines running at anchor burn
+    fuel and emit inside coastal airsheds near dense population centres.
+  * Reduced deadheading removes ballast voyages that carry no cargo at all.
+
+Social and institutional
+  * More reliable fuel supply to coastal thermal plants supports grid stability
+    for the populations they serve.
+  * Reduced landed cost of imported coal feeds through to power generation
+    cost.
+  * Lower cyclone exposure for crews and port workers, through explicit Bay of
+    Bengal seasonal risk in the timing decision.
+  * The provenance and honesty architecture is itself reusable: any Indian
+    public-sector analytics programme facing the same "can we trust this
+    number" question can adopt the pattern.
